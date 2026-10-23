@@ -113,7 +113,9 @@ def run_benchmark(
                 )
             ]
 
-        detected = len(matches) > 0
+        # A detection in Tripwire benchmark is a leak from UNTRUSTED or SECRET spans
+        leak_matches = [m for m in matches if m.span.trust == "UNTRUSTED" or m.span.secret]
+        detected = len(leak_matches) > 0
 
         if expected == "leak":
             if detected:

@@ -83,10 +83,15 @@ def normalize(text: str) -> str:
     # 6. "at" / "dot" obfuscation  (attacker [at] mail [dot] com)
     t = re.sub(r"\s*\[at\]\s*", "@", t, flags=re.IGNORECASE)
     t = re.sub(r"\s*\(at\)\s*", "@", t, flags=re.IGNORECASE)
-    t = re.sub(r"\s+at\s+", "@", t, flags=re.IGNORECASE)
     t = re.sub(r"\s*\[dot\]\s*", ".", t, flags=re.IGNORECASE)
     t = re.sub(r"\s*\(dot\)\s*", ".", t, flags=re.IGNORECASE)
-    t = re.sub(r"\s+dot\s+", ".", t, flags=re.IGNORECASE)
+    # Contextual natural language at/dot (e.g. 'attacker at mail dot com')
+    t = re.sub(
+        r"\b([a-zA-Z0-9._%+-]+)\s+at\s+([a-zA-Z0-9.-]+)\s+dot\s+([a-zA-Z]{2,})\b",
+        r"\1@\2.\3",
+        t,
+        flags=re.IGNORECASE,
+    )
 
     # 7. Spaced-out text collapse: "a t t a c k e r" → "attacker"
     #    Heuristic: if we see ≥4 single-char tokens separated by spaces

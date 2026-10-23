@@ -55,11 +55,11 @@ _HEURISTIC_PATTERNS: list[tuple[re.Pattern, float, str]] = [
      0.85, "DECEPTION: 'without user knowing'"),
 
     # Tool-name mentions in non-tool context
-    (re.compile(r"\b(send_email|forward|http_post|delete_file|make_payment)\b", re.I),
+    (re.compile(r"\b(send_email|forward_email|http_post|delete_file|make_payment)\b", re.I),
      0.5, "TOOL_MENTION: references a tool name"),
-    (re.compile(r"\bforward\s+.*\s+to\s+\S+@\S+", re.I),
+    (re.compile(r"\bforward\s+(all\s+)?(payroll|secrets?|data|files?|credentials?|passwords?|tokens?|bank\s+statement).*to\s+\S+@\S+", re.I),
      0.6, "TOOL_MENTION: 'forward ... to email'"),
-    (re.compile(r"\bsend\s+.*\s+to\s+\S+@\S+", re.I),
+    (re.compile(r"\bsend\s+(all\s+)?(payroll|secrets?|data|files?|credentials?|passwords?|tokens?|bank\s+statement).*to\s+\S+@\S+", re.I),
      0.5, "TOOL_MENTION: 'send ... to email'"),
 
     # Hidden text signals
@@ -174,7 +174,13 @@ def _learned_score(text: str) -> Tuple[float, str]:
 #  Combined scoring
 # ═══════════════════════════════════════════════════════════════════════
 
-def injection_score(text: str) -> Tuple[float, List[str]]:
+DEFAULT_INJECTION_THRESHOLD = 0.75
+
+
+def injection_score(
+    text: str,
+    threshold: float = DEFAULT_INJECTION_THRESHOLD,
+) -> Tuple[float, List[str]]:
     """Score text for prompt injection signals.
 
     Blends heuristic and learned classifier scores.  This is ADVISORY
@@ -183,6 +189,7 @@ def injection_score(text: str) -> Tuple[float, List[str]]:
 
     Args:
         text: The text to analyze (email body, web page, file contents).
+        threshold: Classification threshold for the learned model (default: 0.75).
 
     Returns:
         (score, reasons) where:
@@ -192,21 +199,32 @@ def injection_score(text: str) -> Tuple[float, List[str]]:
     h_score, h_reasons = _heuristic_score(text)
 
     l_prob, l_label = _learned_score(text)
-    # The ML classifier only flags injection if probability exceeds decision boundary (> 0.5)
-    l_score = l_prob if l_prob > 0.5 else 0.0
-    if l_score > 0.5:
+    # The ML classifier only flags injection if probability meets decision threshold (>= 0.75)
+    l_score = l_prob if l_prob >= threshold else 0.0
+    if l_score >= threshold:
         h_reasons.append(f"ML_CLASSIFIER: {l_label} (p={l_prob:.2f})")
 
     # Blend: combine heuristic and learned advisory signals
-    if h_score > 0.3 and l_score > 0.5:
+    if h_score >= threshold:
+        combined = h_score
+    elif h_score > 0.3 and l_score >= threshold:
         combined = min(1.0, max(h_score, l_score) + 0.1)
     elif h_score > 0:
-        combined = max(h_score, l_score)
+        combined = h_score
     else:
-        # Learned classifier alone (advisory signal)
-        combined = round(l_score * 0.8, 4)
+        # Learned classifier alone if it meets the decision threshold
+        combined = round(l_score * 0.8, 4) if l_score >= threshold else 0.0
 
     return round(combined, 4), h_reasons
+
+
+def is_injection(
+    text: str,
+    threshold: float = DEFAULT_INJECTION_THRESHOLD,
+) -> bool:
+    """Return True if prompt injection signals meet or exceed threshold."""
+    score, _ = injection_score(text, threshold=threshold)
+    return score >= threshold
 
 
 # ═══════════════════════════════════════════════════════════════════════

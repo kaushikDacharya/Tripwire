@@ -10,9 +10,9 @@ Provides:
 from detect.models import Span, Match, Finding
 from detect.secrets import detect_secrets
 from detect.matcher import trace
-from detect.injection import injection_score
+from detect.injection import injection_score, is_injection
 
 __all__ = [
     "Span", "Match", "Finding",
-    "detect_secrets", "trace", "injection_score",
+    "detect_secrets", "trace", "injection_score", "is_injection",
 ]

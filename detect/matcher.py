@@ -50,15 +50,18 @@ class SpanCache:
     """
 
     def __init__(self):
-        self._cache: Dict[int, dict] = {}  # keyed by id(span)
+        self._cache: Dict[tuple, dict] = {}
+
+    def _key(self, span: Span) -> tuple:
+        return (span.text, span.source, span.trust, span.secret)
 
     def add(self, span: Span) -> None:
         """Precompute and cache normalized text, shingles, and entities."""
-        sid = id(span)
-        if sid in self._cache:
+        key = self._key(span)
+        if key in self._cache:
             return
         norm = normalize(span.text)
-        self._cache[sid] = {
+        self._cache[key] = {
             "norm": norm,
             "shingles": _shingles(norm),
             "entities": extract_all_entities(span.text),
@@ -66,10 +69,10 @@ class SpanCache:
 
     def get(self, span: Span) -> dict:
         """Get cached data for a span, computing if necessary."""
-        sid = id(span)
-        if sid not in self._cache:
+        key = self._key(span)
+        if key not in self._cache:
             self.add(span)
-        return self._cache[sid]
+        return self._cache[key]
 
     def clear(self) -> None:
         self._cache.clear()
@@ -119,12 +122,17 @@ def _try_decode_hex(text: str) -> Optional[str]:
 
 def _score_pair(arg_norm: str, arg_shingles: set, arg_entities: dict,
                 span_norm: str, span_shingles: set, span_entities: dict,
+                arg_raw: str = "", span_raw: str = "",
                 ) -> dict[str, float]:
     """Score a single (argument, span) pair across all layers."""
     scores: dict[str, float] = {}
 
     # 1. Exact: is the argument (≥8 chars) literally inside the span?
-    if len(arg_norm) >= 8 and arg_norm in span_norm:
+    # Run exact matching on raw, pre-canonicalization text first
+    arg_raw_strip = arg_raw.strip() if arg_raw else ""
+    if len(arg_raw_strip) >= 8 and (arg_raw_strip in span_raw or arg_raw_strip.lower() in span_raw.lower()):
+        scores["exact"] = 1.0
+    elif len(arg_norm) >= 8 and arg_norm in span_norm:
         scores["exact"] = 1.0
 
     # 2. Entity: shared emails/URLs/phones/UPI-IDs
@@ -139,16 +147,32 @@ def _score_pair(arg_norm: str, arg_shingles: set, arg_entities: dict,
         if containment > 0:
             scores["ngram"] = round(containment, 4)
 
+    # N-gram containment is already computed above
+
     # 4. Fuzzy (rapidfuzz partial_ratio), only for strings ≥ 12 chars
     if len(arg_norm) >= 12:
-        try:
-            from rapidfuzz import fuzz
-            ratio = fuzz.partial_ratio(arg_norm, span_norm) / 100.0
-            if ratio > 0.3:  # ignore very low scores
-                scores["fuzzy"] = round(ratio, 4)
-        except ImportError:
-            # rapidfuzz not installed — skip fuzzy layer
-            pass
+        # Fast path guard clause against O(N^2) latency spikes on long text.
+        # If text length exceeds limits, skip expensive fuzzy matching
+        # unless n-gram containment already indicates significant overlap.
+        MAX_FUZZY_ARG_LEN = 300
+        MAX_FUZZY_SPAN_LEN = 800
+        is_long = len(arg_norm) > MAX_FUZZY_ARG_LEN or len(span_norm) > MAX_FUZZY_SPAN_LEN
+        should_run_fuzzy = not is_long or (scores.get("ngram", 0.0) >= 0.20)
+
+        # Guard: if argument looks like a pure email, don't fuzzy partial-match
+        # against body text that doesn't even contain '@'
+        if "@" in arg_norm and "@" not in span_norm:
+            should_run_fuzzy = False
+
+        if should_run_fuzzy:
+            try:
+                from rapidfuzz import fuzz
+                ratio = fuzz.partial_ratio(arg_norm, span_norm, score_cutoff=65.0) / 100.0
+                if ratio >= 0.70:  # ignore low coincidental scores to prevent false positives
+                    scores["fuzzy"] = round(ratio, 4)
+            except ImportError:
+                # rapidfuzz not installed — skip fuzzy layer
+                pass
 
     return scores
 
@@ -198,6 +222,7 @@ def trace(arg_text: str,
     # Build trusted entity set for the trust rule
     if trusted_entities is None:
         trusted_entities = _build_trusted_entities(spans)
+    flat_trusted = _flatten_entities(trusted_entities)
 
     matches: List[Match] = []
 
@@ -208,6 +233,7 @@ def trace(arg_text: str,
         layer_scores = _score_pair(
             arg_norm, arg_shingles, arg_entities,
             cached["norm"], cached["shingles"], cached["entities"],
+            arg_raw=arg_text, span_raw=span.text,
         )
 
         # Score decoded versions too (base64/hex evasion)
@@ -218,6 +244,7 @@ def trace(arg_text: str,
             extra_scores = _score_pair(
                 extra_norm, extra_shingles, extra_entities,
                 cached["norm"], cached["shingles"], cached["entities"],
+                arg_raw=extra, span_raw=span.text,
             )
             # Merge: take max per layer
             for k, v in extra_scores.items():
@@ -232,17 +259,23 @@ def trace(arg_text: str,
         if combined < threshold:
             continue
 
-        # Trust rule: suppress entity matches that the user also provided
-        if span.trust == "UNTRUSTED" and "entity" in layer_scores:
+        # Trust rule: suppress untrusted matches if entity or argument was provided by trusted user
+        if span.trust == "UNTRUSTED":
             shared_with_untrusted = entity_overlap(arg_entities, cached["entities"])
-            # If ALL shared entities also appear in trusted spans, suppress
-            if shared_with_untrusted and shared_with_untrusted <= _flatten_entities(trusted_entities):
-                del layer_scores["entity"]
-                if not layer_scores:
-                    continue
-                combined = max(layer_scores.values())
-                if combined < threshold:
-                    continue
+            # If ALL shared entities also appear in trusted spans, suppress entity layer
+            if shared_with_untrusted and shared_with_untrusted <= flat_trusted:
+                layer_scores.pop("entity", None)
+            # If the argument is an entity provided by trusted user or appears in trusted text,
+            # suppress accidental fuzzy/ngram matches against untrusted spans
+            if arg_norm in flat_trusted or arg_text.strip().lower() in [s.text.strip().lower() for s in spans if s.trust == "TRUSTED"]:
+                layer_scores.pop("fuzzy", None)
+                layer_scores.pop("ngram", None)
+
+            if not layer_scores:
+                continue
+            combined = max(layer_scores.values())
+            if combined < threshold:
+                continue
 
         # Find the best matching layer for the snippet
         best_kind = max(layer_scores, key=layer_scores.get)
