@@ -1,0 +1,48 @@
+allowlist:
+  - accountant@company.com
+  - vendor@acme.com
+
+default: allow
+
+rules:
+  # R0: Block secrets sent to untrusted recipients
+  - id: R0
+    when:
+      recipient_untrusted: true
+      body_secret: true
+      recipient_in_allowlist: false
+    action: block
+    reason: "Recipient derived from untrusted email; content labeled SECRET"
+
+  # R1: Block secrets sent to anyone not allowlisted
+  - id: R1
+    when:
+      body_secret: true
+      recipient_in_allowlist: false
+    action: block
+    reason: "SECRET content going to a recipient not on the allowlist"
+
+  # R2: Ask for approval when recipient is untrusted
+  - id: R2
+    when:
+      recipient_untrusted: true
+      recipient_in_allowlist: false
+    action: ask
+    reason: "Recipient derived from untrusted data"
+
+  # R3: Ask for approval if high injection score detected in untrusted context
+  - id: R3
+    when:
+      untrusted_in_context: true
+      injection_high: true
+      recipient_in_allowlist: false
+    action: ask
+    reason: "Injection-like text in context before an external action"
+
+  # R4: Conservative fallback for any untrusted content in context
+  - id: R4
+    when:
+      untrusted_in_context: true
+      recipient_in_allowlist: false
+    action: ask
+    reason: "Conservative fallback: untrusted content in context + external action"
