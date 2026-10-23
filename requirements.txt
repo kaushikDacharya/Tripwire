@@ -1,0 +1,6 @@
+# Role C needs NOTHING beyond the Python standard library (Python 3.9+).
+# Optional, only if you later build the LLMAgent:
+#   groq
+#   google-generativeai
+# Optional test runner (the tests also run with plain `python -m unittest`):
+#   pytest
