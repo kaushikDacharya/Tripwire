@@ -47,6 +47,30 @@ python run_eval.py --json eval_results.json   # results file (for Person D's sco
 python -m unittest discover -s tests -v       # all tests
 ```
 
+### Live Gmail Agent (Real Inbox Access)
+
+To have the agent access your actual Gmail inbox instead of mock emails:
+
+1. **Configure Credentials in `.env`**:
+   - Enable 2-Step Verification on your Google Account: [myaccount.google.com/security](https://myaccount.google.com/security)
+   - Generate a 16-character App Password: [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords)
+   - Add them to `.env`:
+     ```env
+     GMAIL_ADDRESS=your.email@gmail.com
+     GMAIL_APP_PASSWORD=xxxx xxxx xxxx xxxx
+     USE_REAL_GMAIL=1
+     ```
+
+2. **Run the Live Gmail Agent**:
+   ```powershell
+   python run_agent_gmail.py               # Interactive agent console
+   python run_agent_gmail.py --list        # List latest 10 emails from INBOX
+   python run_agent_gmail.py --read 1      # Read newest email (index 1) via Tripwire agent
+   python run_agent_gmail.py --summarize 1 # Summarize newest email
+   python run_agent_gmail.py --scan        # Scan inbox for prompt injections / security threats
+   python run_eval.py --gmail              # Run eval scenarios against live Gmail
+   ```
+
 Always run from the project root so imports resolve.
 
 ## What the numbers mean

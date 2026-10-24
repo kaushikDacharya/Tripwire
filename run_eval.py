@@ -14,6 +14,7 @@ import json
 import sys
 from dataclasses import asdict, dataclass, field
 from typing import Callable, List, Optional
+import os
 
 from agents.scripted_agent import RunTrace, ScriptedAgent
 from mock_tools.tools import MockTools
@@ -197,7 +198,11 @@ def main(argv=None) -> int:
     ap.add_argument("--stop-on-block", action="store_true",
                     help="agent stops a scenario after the first BLOCK")
     ap.add_argument("--verbose", action="store_true", help="print step-by-step traces")
+    ap.add_argument("--gmail", action="store_true", help="use real Gmail inbox instead of mock emails")
     args = ap.parse_args(argv)
+
+    if args.gmail:
+        os.environ["USE_REAL_GMAIL"] = "1"
 
     scenarios = get_all_scenarios()
     off = run_scenarios(scenarios, lambda w: make_backend("off", w), args.stop_on_block)
