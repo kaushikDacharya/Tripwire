@@ -1,286 +1,103 @@
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Tripwire | Security Dashboard</title>
-  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
-  <header class="topbar">
-    <div>
-      <p class="eyebrow">AI AGENT SECURITY</p>
-      <h1>Tripwire <span class="muted">/ Control Center</span></h1>
-      <p class="muted">Don't trust the model. Trust the flow.</p>
-    </div>
-    <span id="connection" class="pill">Connecting...</span>
+  <header>
+    <h1>🪤 Tripwire</h1>
+    <div id="scoreboard"></div>
   </header>
 
   <main>
-    <section class="hero">
-      <div>
-        <p class="eyebrow">INFORMATION-FLOW FIREWALL</p>
-        <h2>Every action leaves a trace.</h2>
-        <p>Monitor tool calls, inspect security decisions,
-           and review actions awaiting human approval.</p>
-      </div>
-      <div class="hero-icon">⬡</div>
-    </section>
-
-    <section class="metrics">
-      <article class="metric">
-        <span>Audit events</span>
-        <strong id="total">0</strong>
-      </article>
-      <article class="metric">
-        <span>Blocked</span>
-        <strong id="blocked">0</strong>
-      </article>
-      <article class="metric">
-        <span>Awaiting review</span>
-        <strong id="pending">0</strong>
-      </article>
-      <article class="metric">
-        <span>Allowed</span>
-        <strong id="allowed">0</strong>
-      </article>
+    <section class="panel">
+      <h2>Live audit log</h2>
+      <table id="log"><thead>
+        <tr><th>Time</th><th>Tool</th><th>Args</th><th>Verdict</th><th>Reason</th></tr>
+      </thead><tbody></tbody></table>
     </section>
 
     <section class="panel">
-      <div class="section-heading">
-        <div>
-          <h2>Human approval queue</h2>
-          <p class="muted">Review actions marked ASK.</p>
-        </div>
-      </div>
-      <div id="approvals" class="approval-list">
-        <p class="muted">Loading approvals...</p>
-      </div>
+      <h2>Awaiting approval</h2>
+      <div id="approvals"></div>
     </section>
 
     <section class="panel">
-      <div class="section-heading">
-        <div>
-          <h2>Security audit log</h2>
-          <p class="muted">Latest tool decisions from Tripwire.</p>
-        </div>
-        <select id="filter" aria-label="Filter audit events">
-          <option value="ALL">All decisions</option>
-          <option value="ALLOW">Allowed</option>
-          <option value="ASK">Needs review</option>
-          <option value="BLOCK">Blocked</option>
-        </select>
-      </div>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Time</th>
-              <th>Tool</th>
-              <th>Decision</th>
-              <th>Reason</th>
-              <th>Details</th>
-            </tr>
-          </thead>
-          <tbody id="events">
-            <tr><td colspan="5">Loading events...</td></tr>
-          </tbody>
-        </table>
+      <h2>Before / after</h2>
+      <button id="run">Run attack</button>
+      <div class="split">
+        <div><h3>Tripwire OFF</h3><pre id="out-off"></pre></div>
+        <div><h3>Tripwire ON</h3><pre id="out-on"></pre></div>
       </div>
     </section>
-
-    <section class="panel">
-      <div class="section-heading">
-        <div>
-          <h2>Evaluation scoreboard</h2>
-          <p class="muted">Metrics supplied by the evaluation runner.</p>
-        </div>
-      </div>
-      <div class="score-grid">
-        <div>
-          <span>Attacks blocked</span>
-          <strong id="attack-score">—</strong>
-        </div>
-        <div>
-          <span>Benign tasks blocked</span>
-          <strong id="benign-score">—</strong>
-        </div>
-        <div>
-          <span>ASK decisions</span>
-          <strong id="ask-score">—</strong>
-        </div>
-      </div>
-      <p class="muted small">
-        Initial metrics are placeholders. Connect run_eval.py before
-        reporting results.
-      </p>
-    </section>
-
-    <footer>TRIPWIRE · Development dashboard · Local demo</footer>
   </main>
 
-  <script>
-    const $ = (id) => document.getElementById(id);
+<script>
+let lastId = 0;
+const $ = s => document.querySelector(s);
 
-    // Render untrusted values as text, never as executable HTML.
-    function cell(value) {
-      const td = document.createElement("td");
-      td.textContent = value == null ? "" : String(value);
-      return td;
-    }
+async function pollAudit() {
+  const rows = await (await fetch(`/api/audit?since=${lastId}`)).json();
+  for (const e of rows) {
+    lastId = Math.max(lastId, e.id);
+    const tr = document.createElement("tr");
+    tr.className = e.verdict.toLowerCase();
+    tr.innerHTML = `
+      <td>${new Date(e.ts * 1000).toLocaleTimeString()}</td>
+      <td>${e.tool}</td>
+      <td><code>${JSON.stringify(e.args)}</code></td>
+      <td><span class="badge ${e.verdict.toLowerCase()}">${e.verdict}</span></td>
+      <td>${e.reason_code}</td>`;
+    const detail = document.createElement("tr");
+    detail.className = "detail hidden";
+    detail.innerHTML = `<td colspan="5">${e.explanation}
+      ${e.evidence.map(s => `<div class="span">${s.source}: "${s.text}" (${s.score})</div>`).join("")}</td>`;
+    tr.onclick = () => detail.classList.toggle("hidden");
+    $("#log tbody").prepend(detail);
+    $("#log tbody").prepend(tr);
+  }
+}
 
-    function makeBadge(verdict) {
-      const badge = document.createElement("span");
-      badge.className = "badge " + verdict.toLowerCase();
-      badge.textContent = verdict;
-      return badge;
-    }
+async function pollApprovals() {
+  const items = await (await fetch("/api/pending")).json();
+  $("#approvals").innerHTML = items.map(e => `
+    <div class="card">
+      <b>${e.tool}</b> → ${JSON.stringify(e.args)}
+      <p>${e.explanation}</p>
+      <button onclick="decide(${e.id}, 'approve')">Approve</button>
+      <button class="deny" onclick="decide(${e.id}, 'deny')">Deny</button>
+    </div>`).join("") || "<i>Nothing pending</i>";
+}
 
-    async function api(path, options = {}) {
-      const response = await fetch(path, options);
-      const data = await response.json();
-      if (!response.ok) {
-        throw new Error(data.error || "Request failed");
-      }
-      return data;
-    }
+async function decide(id, action) {
+  await fetch(`/api/approve/${id}`, {method: "POST",
+    headers: {"Content-Type": "application/json"}, body: JSON.stringify({action})});
+  pollApprovals();
+}
 
-    async function review(id, decision) {
-      if (!confirm(`Are you sure you want to ${decision} this action?`)) {
-        return;
-      }
+async function loadScore() {
+  const s = await (await fetch("/api/scoreboard")).json();
+  $("#scoreboard").textContent =
+    `Attacks blocked ${s.attacks_blocked}/${s.attacks_total} · ` +
+    `Benign wrongly blocked ${s.benign_wrongly_blocked}/${s.benign_total}`;
+}
 
-      try {
-        await api(`/api/approval/${id}`, {
-          method: "POST",
-          headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({decision})
-        });
-        await refresh();
-      } catch (error) {
-        alert(error.message);
-      }
-    }
+async function runBoth() {
+  for (const on of [false, true]) {
+    const r = await (await fetch("/api/run", {method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({scenario: "payroll_exfil", tripwire: on})})).json();
+    $(on ? "#out-on" : "#out-off").textContent =
+      r.outbox.length ? JSON.stringify(r.outbox, null, 2) : "Outbox empty ✅ (attack blocked)";
+  }
+}
 
-    function renderApprovals(events) {
-      const root = $("approvals");
-      root.replaceChildren();
-
-      const pending = events.filter(
-        e => e.verdict === "ASK" && e.status === "pending"
-      );
-
-      if (!pending.length) {
-        root.textContent = "No actions awaiting approval.";
-        return;
-      }
-
-      for (const event of pending) {
-        const card = document.createElement("article");
-        card.className = "approval-card";
-
-        const title = document.createElement("h3");
-        title.textContent = event.tool;
-
-        const description = document.createElement("p");
-        description.textContent = event.summary;
-
-        const reason = document.createElement("p");
-        reason.textContent = "Reason: " + event.reason;
-
-        const actions = document.createElement("div");
-        actions.className = "actions";
-
-        for (const decision of ["approve", "deny"]) {
-          const button = document.createElement("button");
-          button.textContent = decision === "approve" ? "Approve" : "Deny";
-          button.className = decision;
-          button.addEventListener(
-            "click", () => review(event.id, decision)
-          );
-          actions.append(button);
-        }
-
-        card.append(title, description, reason, actions);
-        root.append(card);
-      }
-    }
-
-    function renderEvents(events) {
-      const filter = $("filter").value;
-      const visible = events.filter(
-        e => filter === "ALL" || e.verdict === filter
-      );
-
-      const body = $("events");
-      body.replaceChildren();
-
-      if (!visible.length) {
-        const tr = document.createElement("tr");
-        const td = cell("No matching events");
-        td.colSpan = 5;
-        tr.append(td);
-        body.append(tr);
-        return;
-      }
-
-      for (const event of visible) {
-        const tr = document.createElement("tr");
-        const time = event.time
-          ? new Date(event.time).toLocaleTimeString()
-          : "—";
-
-        tr.append(cell(time), cell(event.tool));
-
-        const decision = document.createElement("td");
-        decision.append(makeBadge(event.verdict));
-        tr.append(decision, cell(event.reason));
-
-        const details = document.createElement("td");
-        details.textContent = [
-          event.summary,
-          ...(Array.isArray(event.evidence) ? event.evidence : [])
-        ].join(" · ");
-
-        tr.append(details);
-        body.append(tr);
-      }
-    }
-
-    async function refresh() {
-      try {
-        const [events, metrics] = await Promise.all([
-          api("/api/audit"),
-          api("/api/metrics")
-        ]);
-
-        $("connection").textContent = "● Connected";
-        $("total").textContent = events.length;
-        $("blocked").textContent =
-          events.filter(e => e.verdict === "BLOCK").length;
-        $("allowed").textContent =
-          events.filter(e => e.verdict === "ALLOW").length;
-        $("pending").textContent =
-          events.filter(e => e.verdict === "ASK" &&
-                             e.status === "pending").length;
-
-        $("attack-score").textContent =
-          `${metrics.attacks_blocked} / ${metrics.attack_total}`;
-        $("benign-score").textContent =
-          `${metrics.benign_blocked} / ${metrics.benign_total}`;
-        $("ask-score").textContent = metrics.ask_count;
-
-        renderApprovals(events);
-        renderEvents(events);
-      } catch (error) {
-        $("connection").textContent = "● Disconnected";
-      }
-    }
-
-    $("filter").addEventListener("change", refresh);
-    refresh();
-    setInterval(refresh, 2000);
-  </script>
+$("#run").onclick = runBoth;
+setInterval(pollAudit, 1000);
+setInterval(pollApprovals, 1000);
+loadScore(); pollAudit(); pollApprovals();
+</script>
 </body>
 </html>
