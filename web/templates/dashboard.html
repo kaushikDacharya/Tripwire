@@ -2,102 +2,289 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Tripwire | Security Dashboard</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
-<body>
-  <header>
-    <h1>🪤 Tripwire</h1>
-    <div id="scoreboard"></div>
+<body class="fw-on">
+
+  <header class="gate">
+    <div class="gate-text">
+      <h1>Tripwire</h1>
+      <p id="gate-msg">Firewall is on. Every tool call the agent makes is checked before it runs.</p>
+    </div>
+    <button id="fw-toggle" class="switch" role="switch" aria-checked="true" aria-label="Firewall mode">
+      <span class="switch-label" id="switch-label">Firewall on</span>
+      <span class="knob"></span>
+    </button>
   </header>
 
-  <main>
-    <section class="panel">
-      <h2>Live audit log</h2>
-      <table id="log"><thead>
-        <tr><th>Time</th><th>Tool</th><th>Args</th><th>Verdict</th><th>Reason</th></tr>
-      </thead><tbody></tbody></table>
-    </section>
+  <div class="layout">
+    <main>
 
-    <section class="panel">
-      <h2>Awaiting approval</h2>
-      <div id="approvals"></div>
-    </section>
+      <section class="block">
+        <h2>Try a scenario</h2>
+        <p class="hint">Run uses the current firewall mode. Compare runs it with the firewall off, then on.</p>
+        <ul id="scenarios" class="scenarios"></ul>
+      </section>
 
-    <section class="panel">
-      <h2>Before / after</h2>
-      <button id="run">Run attack</button>
-      <div class="split">
-        <div><h3>Tripwire OFF</h3><pre id="out-off"></pre></div>
-        <div><h3>Tripwire ON</h3><pre id="out-on"></pre></div>
-      </div>
-    </section>
-  </main>
+      <section class="block">
+        <h2>Before and after</h2>
+        <div class="split">
+          <div class="panel off">
+            <h3>Firewall off</h3>
+            <div id="out-off"></div>
+          </div>
+          <div class="panel on">
+            <h3>Firewall on</h3>
+            <div id="out-on"></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="block">
+        <h2>Live audit log</h2>
+        <div class="table-wrap">
+          <table id="log">
+            <thead>
+              <tr><th>Time</th><th>Tool</th><th>Arguments</th><th>Decision</th><th>Reason</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p id="log-empty" class="empty">No tool calls yet. Run a scenario above to see decisions appear here.</p>
+      </section>
+
+    </main>
+
+    <aside>
+
+      <section class="block">
+        <h2>Needs your decision</h2>
+        <div id="approvals"></div>
+      </section>
+
+      <section class="block">
+        <h2>Evaluation results</h2>
+        <dl class="score">
+          <div><dt>Attacks blocked</dt><dd id="sc-attacks">-</dd></div>
+          <div><dt>Benign tasks wrongly blocked</dt><dd id="sc-benign">-</dd></div>
+          <div><dt>Asked for approval</dt><dd id="sc-ask">-</dd></div>
+        </dl>
+      </section>
+
+      <section class="block">
+        <div class="block-head">
+          <h2>Run history</h2>
+          <button id="clear" class="link-btn">Clear history</button>
+        </div>
+        <ol id="history" class="history"></ol>
+      </section>
+
+    </aside>
+  </div>
 
 <script>
-let lastId = 0;
 const $ = s => document.querySelector(s);
+const esc = s => String(s).replace(/[&<>"']/g, c =>
+  ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+const post = (url, body = {}) => fetch(url, {
+  method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)
+}).then(r => r.json());
+const time = ts => new Date(ts * 1000).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"});
 
-async function pollAudit() {
-  const rows = await (await fetch(`/api/audit?since=${lastId}`)).json();
-  for (const e of rows) {
-    lastId = Math.max(lastId, e.id);
-    const tr = document.createElement("tr");
-    tr.className = e.verdict.toLowerCase();
-    tr.innerHTML = `
-      <td>${new Date(e.ts * 1000).toLocaleTimeString()}</td>
-      <td>${e.tool}</td>
-      <td><code>${JSON.stringify(e.args)}</code></td>
-      <td><span class="badge ${e.verdict.toLowerCase()}">${e.verdict}</span></td>
-      <td>${e.reason_code}</td>`;
-    const detail = document.createElement("tr");
-    detail.className = "detail hidden";
-    detail.innerHTML = `<td colspan="5">${e.explanation}
-      ${e.evidence.map(s => `<div class="span">${s.source}: "${s.text}" (${s.score})</div>`).join("")}</td>`;
-    tr.onclick = () => detail.classList.toggle("hidden");
-    $("#log tbody").prepend(detail);
-    $("#log tbody").prepend(tr);
+// Everything below that comes from the agent or from emails goes through esc().
+// This is a security dashboard, so it must not be injectable by the data it displays.
+
+let firewallOn = true;
+const openRows = new Set();
+const columns = {off: null, on: null};
+const lastRender = {};
+
+function changed(key, data) {
+  const s = JSON.stringify(data);
+  if (lastRender[key] === s) return false;
+  lastRender[key] = s;
+  return true;
+}
+
+/* ---------- firewall toggle ---------- */
+function applyMode(on) {
+  firewallOn = on;
+  document.body.className = on ? "fw-on" : "fw-off";
+  $("#fw-toggle").setAttribute("aria-checked", on);
+  $("#switch-label").textContent = on ? "Firewall on" : "Firewall off";
+  $("#gate-msg").textContent = on
+    ? "Firewall is on. Every tool call the agent makes is checked before it runs."
+    : "Firewall is off. The agent can act on any instruction it finds, including hidden ones.";
+}
+
+$("#fw-toggle").onclick = async () => {
+  const r = await post("/api/firewall", {on: !firewallOn});
+  applyMode(r.on);
+  refresh();
+};
+
+/* ---------- scenarios ---------- */
+async function loadScenarios() {
+  const list = await (await fetch("/api/scenarios")).json();
+  $("#scenarios").innerHTML = list.map(s => `
+    <li class="scenario ${esc(s.type)}">
+      <span class="tag ${esc(s.type)}">${s.type === "attack" ? "Attack" : "Normal task"}</span>
+      <span class="scenario-label">${esc(s.label)}</span>
+      <span class="scenario-actions">
+        <button data-run="${esc(s.key)}">Run</button>
+        <button data-compare="${esc(s.key)}" class="secondary">Compare</button>
+      </span>
+    </li>`).join("");
+}
+
+$("#scenarios").onclick = e => {
+  const run = e.target.dataset.run, cmp = e.target.dataset.compare;
+  if (run) runScenario(run);
+  if (cmp) compare(cmp);
+};
+
+async function runScenario(key, mode) {
+  const r = await post("/api/run", {scenario: key, tripwire: mode});
+  columns[r.firewall ? "on" : "off"] = r;
+  renderColumns();
+  refresh();
+}
+
+async function compare(key) {
+  await runScenario(key, false);
+  await runScenario(key, true);
+}
+
+/* ---------- before / after ---------- */
+const effectIcon = {email: "Email", http: "Web request", delete: "File deleted"};
+
+function renderColumns() {
+  for (const m of ["off", "on"]) {
+    const r = columns[m], el = $("#out-" + m);
+    if (!r) { el.innerHTML = `<p class="empty">Nothing run yet.</p>`; continue; }
+    el.innerHTML = `
+      <div class="outcome ${esc(r.tone)}">${esc(r.outcome)}</div>
+      <p class="run-label">${esc(r.label)}</p>
+      ${r.effects.length
+        ? `<ul class="effects">${r.effects.map(f =>
+            `<li><b>${esc(effectIcon[f.kind] || f.kind)}</b> ${esc(f.summary)}</li>`).join("")}</ul>`
+        : `<p class="clean">Nothing left the system.</p>`}`;
   }
 }
 
-async function pollApprovals() {
-  const items = await (await fetch("/api/pending")).json();
-  $("#approvals").innerHTML = items.map(e => `
+/* ---------- audit log ---------- */
+function renderAudit(entries) {
+  if (!changed("audit", [entries, [...openRows]])) return;
+  $("#log-empty").style.display = entries.length ? "none" : "block";
+  $("#log tbody").innerHTML = entries.slice().reverse().map(e => {
+    const v = e.verdict.toLowerCase();
+    const open = openRows.has(e.id);
+    const status = e.status ? ` <span class="status">(${esc(e.status)})</span>` : "";
+    const evidence = e.evidence.map(s =>
+      `<div class="span"><b>${esc(s.source)}</b> matched at ${esc(s.score)}: "${esc(s.text)}"</div>`).join("");
+    return `
+      <tr class="row ${v}" data-id="${e.id}">
+        <td>${time(e.ts)}</td>
+        <td>${esc(e.tool)}</td>
+        <td><code>${esc(JSON.stringify(e.args))}</code></td>
+        <td><span class="badge ${v}">${esc(e.verdict)}</span>${status}</td>
+        <td>${esc(e.reason_code)}</td>
+      </tr>
+      <tr class="detail ${open ? "" : "hidden"}"><td colspan="5">
+        <p>${esc(e.explanation)}</p>${evidence}
+      </td></tr>`;
+  }).join("");
+}
+
+$("#log tbody").onclick = e => {
+  const tr = e.target.closest("tr.row");
+  if (!tr) return;
+  const id = Number(tr.dataset.id);
+  openRows.has(id) ? openRows.delete(id) : openRows.add(id);
+  lastRender.audit = null;
+  refresh();
+};
+
+/* ---------- approvals ---------- */
+function renderApprovals(items) {
+  if (!changed("pending", items)) return;
+  $("#approvals").innerHTML = items.length ? items.map(e => `
     <div class="card">
-      <b>${e.tool}</b> → ${JSON.stringify(e.args)}
-      <p>${e.explanation}</p>
-      <button onclick="decide(${e.id}, 'approve')">Approve</button>
-      <button class="deny" onclick="decide(${e.id}, 'deny')">Deny</button>
-    </div>`).join("") || "<i>Nothing pending</i>";
+      <p class="card-title">${esc(e.tool)} <code>${esc(JSON.stringify(e.args))}</code></p>
+      <p>${esc(e.explanation)}</p>
+      <p class="reason">${esc(e.reason_code)}</p>
+      <div class="card-actions">
+        <button data-decide="approve" data-id="${e.id}">Approve</button>
+        <button data-decide="deny" data-id="${e.id}" class="danger">Deny</button>
+      </div>
+    </div>`).join("") : `<p class="empty">Nothing waiting. Calls that need a human will show up here.</p>`;
 }
 
-async function decide(id, action) {
-  await fetch(`/api/approve/${id}`, {method: "POST",
-    headers: {"Content-Type": "application/json"}, body: JSON.stringify({action})});
-  pollApprovals();
+$("#approvals").onclick = async e => {
+  const action = e.target.dataset.decide;
+  if (!action) return;
+  const r = await post(`/api/decide/${e.target.dataset.id}`, {action});
+  if (r.run) {
+    const m = r.run.firewall ? "on" : "off";
+    if (columns[m] && columns[m].id === r.run.id) { columns[m] = r.run; renderColumns(); }
+  }
+  refresh();
+};
+
+/* ---------- history ---------- */
+function renderHistory(runs) {
+  if (!changed("history", runs)) return;
+  $("#history").innerHTML = runs.length ? runs.map(r => `
+    <li>
+      <div class="history-top">
+        <span class="mode ${r.firewall ? "on" : "off"}">${r.firewall ? "Firewall on" : "Firewall off"}</span>
+        <span class="when">${time(r.ts)}</span>
+      </div>
+      <p class="run-label">${esc(r.label)}</p>
+      <span class="outcome small ${esc(r.tone)}">${esc(r.outcome)}</span>
+    </li>`).join("") : `<li class="empty">Runs you start will be listed here.</li>`;
 }
 
+$("#clear").onclick = async () => {
+  await post("/api/reset");
+  columns.off = columns.on = null;
+  openRows.clear();
+  Object.keys(lastRender).forEach(k => delete lastRender[k]);
+  renderColumns();
+  refresh();
+};
+
+/* ---------- scoreboard ---------- */
 async function loadScore() {
   const s = await (await fetch("/api/scoreboard")).json();
-  $("#scoreboard").textContent =
-    `Attacks blocked ${s.attacks_blocked}/${s.attacks_total} · ` +
-    `Benign wrongly blocked ${s.benign_wrongly_blocked}/${s.benign_total}`;
+  $("#sc-attacks").textContent = `${s.attacks_blocked} of ${s.attacks_total}`;
+  $("#sc-benign").textContent = `${s.benign_wrongly_blocked} of ${s.benign_total}`;
+  $("#sc-ask").textContent = s.ask_count;
 }
 
-async function runBoth() {
-  for (const on of [false, true]) {
-    const r = await (await fetch("/api/run", {method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({scenario: "payroll_exfil", tripwire: on})})).json();
-    $(on ? "#out-on" : "#out-off").textContent =
-      r.outbox.length ? JSON.stringify(r.outbox, null, 2) : "Outbox empty ✅ (attack blocked)";
-  }
+/* ---------- polling ---------- */
+async function refresh() {
+  const [audit, pending, history, fw] = await Promise.all([
+    fetch("/api/audit").then(r => r.json()),
+    fetch("/api/pending").then(r => r.json()),
+    fetch("/api/history").then(r => r.json()),
+    fetch("/api/firewall").then(r => r.json()),
+  ]);
+  if (fw.on !== firewallOn) applyMode(fw.on);
+  renderAudit(audit);
+  renderApprovals(pending);
+  renderHistory(history);
 }
 
-$("#run").onclick = runBoth;
-setInterval(pollAudit, 1000);
-setInterval(pollApprovals, 1000);
-loadScore(); pollAudit(); pollApprovals();
+(async () => {
+  await loadScenarios();
+  await loadScore();
+  renderColumns();
+  await refresh();
+  setInterval(refresh, 1000);
+})();
 </script>
 </body>
 </html>
